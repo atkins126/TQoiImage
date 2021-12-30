@@ -1,7 +1,9 @@
 # TQoiImage
-Delphi TGraphic support for QOI images.
+Delphi support for QOI images.
 
-See https://github.com/phoboslab/qoi
+For more about QOI images see<br>
+https://github.com/phoboslab/qoi
+
 
 Example:
 
@@ -14,15 +16,25 @@ begin
   qoi := TQoiImage.Create;
   try
     qoi.LoadFromFile('..\..\dice.qoi');
+    
     //copy (draw) the qoi image onto a TImage component
-    Image1.Canvas.Draw(0,0, qoi);
-    qoi.SaveToFile('..\..\dice2.bmp');
+    with Image1.Picture.Bitmap do
+    begin
+      SetSize(qoi.Width, qoi.Height);
+      PixelFormat := pf32bit;
+      Canvas.Brush.Color := clBtnFace;
+      Canvas.FillRect(Rect(0, 0, Width, Height));    
+      Canvas.Draw(0,0, qoi);
+    end;
+    
   finally
     qoi.Free;
   end;
 
   qoi := TQoiImage.Create;
   try
+    //nb: TQoiImage objects can load from and 
+    //save to both QOI and BMP file formats
     qoi.LoadFromFile('..\..\dice2.bmp');
     qoi.SaveToFile('..\..\dice2.qoi');
   finally
