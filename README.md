@@ -1,7 +1,7 @@
 # TQoiImage
-Delphi support for QOI images.
+Delphi support for QOI images.<br><br>
 
-For more about QOI images see<br>
+QOI - The “Quite OK Image Format” for fast, lossless image compression<br>
 https://github.com/phoboslab/qoi
 
 
@@ -16,17 +16,8 @@ Example:
   qoi := TQoiImage.Create;
   <b>try</b>
     qoi.LoadFromFile('..\..\dice.qoi');
-    
-    <i>//copy (draw) the qoi image onto a TImage component</i>
-    <b>with</b> Image1.Picture.Bitmap <b>do</b>
-    <b>begin</b>
-      SetSize(qoi.Width, qoi.Height);
-      PixelFormat := pf32bit;
-      Canvas.Brush.Color := clBtnFace;
-      Canvas.FillRect(Rect(0, 0, Width, Height));    
-      Canvas.Draw(0,0, qoi);
-    <b>end</b>;
-    
+    <i>//display the image in a TImage component</i>
+    Image1.Picture.Bitmap.Assign(qoi);
   <b>finally</b>
     qoi.Free;
   <b>end</b>;
@@ -41,4 +32,9 @@ Example:
     qoi.Free;
   <b>end</b>;
 </code></pre>
+
+# QoiPreviewHandler.dll
+Windows Explorer (64bit) Preview Handler shell extension
+
+![previewhandler](https://user-images.githubusercontent.com/5280692/149751938-dc65d49d-77a4-43a8-b894-d0503254f929.png)
 
