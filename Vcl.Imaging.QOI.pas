@@ -4,65 +4,62 @@ interface
 
 (*******************************************************************************
 * Author    :  Angus Johnson                                                   *
-* Version   :  1.06                                                            *
-* Date      :  16 January 2022                                                 *
+* Version   :  2.12                                                             *
+* Date      :  24 January 2022                                                 *
 * Website   :  http://www.angusj.com                                           *
-* Copyright :  Angus Johnson 2021-2022                                         *
-* License   :  The MIT License(MIT), see below.                                *
+* License   :  The MIT License (MIT)                                           *
+*              Copyright (c) 2021-2022 Angus Johnson                           *
+*              https://opensource.org/licenses/MIT                             *
 *******************************************************************************)
 
 (*******************************************************************************
-QOI - The "Quite OK Image" format for fast, lossless image compression
-Dominic Szablewski - https://phoboslab.org
-LICENSE: The MIT License(MIT)
-Copyright(c) 2021 Dominic Szablewski
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files(the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions :
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+* QOI - The "Quite OK Image" format for fast, lossless image compression       *
+* Dominic Szablewski - https://phoboslab.org                                   *
+* LICENSE : The MIT License(MIT)                                               *
+*           Copyright(c) 2021 Dominic Szablewski                               *
 *******************************************************************************)
 
 uses
   System.SysUtils,
   Winapi.Windows,
   Vcl.Graphics,
-  Vcl.ExtCtrls,
   System.Math,
   System.Classes;
 
 type
-  TQoiTriState = (tsUnknown, tsFalse, tsTrue);
+
+  TARGB = packed record
+    case Boolean of
+      false : (B: Byte; G: Byte; R: Byte; A: Byte);
+      true  : (Color: Cardinal);
+  end;
+  PARGB = ^TARGB;
+  TArrayOfARGB = array of TARGB;
+
+  TImageRec = record
+    Width     : Cardinal;
+    Height    : Cardinal;
+    //Channels (as per TQOI_DESC format below)
+    //3: no alpha blending  (alpha: 255)
+    //4: alpha blending     (alpha: 0-255)
+    Channels  : Cardinal;
+    //Pixels  : image layout is top-down
+    Pixels    : TArrayOfARGB;
+  end;
 
   TQoiImage = class(TGraphic)
   private
-    FBitmap     : TBitmap;
-    FSaveAsBmp  : Boolean;
-    FTranspency : TQoiTriState;
-    function GetHasTransparency: Boolean;
+    FQoi      : TImageRec;
+    procedure SetImageRec(const imgRec: TImageRec);
   protected
     procedure Draw(ACanvas: TCanvas; const Rect: TRect); override;
-    function GetEmpty: Boolean; override;
-    function GetHeight: Integer; override;
-    function GetTransparent: Boolean; override;
-    function GetWidth: Integer; override;
+    function  GetEmpty: Boolean; override;
+    function  GetHeight: Integer; override;
+    function  GetTransparent: Boolean; override;
+    function  GetWidth: Integer; override;
     procedure SetHeight(Value: Integer); override;
     procedure SetWidth(Value: Integer); override;
-    procedure ImageChanged(Sender: TObject);
-    property Image: TBitmap read FBitmap;
   public
-    constructor Create; override;
-    destructor Destroy; override;
     procedure Assign(Source: TPersistent); override;
     procedure AssignTo(Dest: TPersistent); override;
     class function CanLoadFromStream(Stream: TStream): Boolean; override;
@@ -74,33 +71,29 @@ type
     procedure SaveToClipboardFormat(var AFormat: Word; var AData: THandle;
       var APalette: HPALETTE); override;
     procedure SetSize(AWidth, AHeight: Integer); override;
-    property HasTransparency: Boolean read GetHasTransparency;
+    property  HasTransparency: Boolean read GetTransparent;
+    property  ImageRec: TImageRec read FQoi write SetImageRec;
   end;
 
-implementation
+  function  SaveToQoiBytes(const img: TImageRec): TBytes;
+  function  LoadFromQoiBytes(const bytes: TBytes): TImageRec;
 
-uses Vcl.Imaging.pngimage;
+  procedure SaveToQoiStream(const img: TImageRec; Stream: TStream);
+  function  LoadFromQoiStream(Stream: TStream): TImageRec;
+
+  function  IsAlphaBlended(img: TImageRec): Boolean;
+
+  function  GetImgRecFromBitmap(bmp: TBitmap): TImageRec;
+  function  CreateBitmapFromImgRec(const img: TImageRec): TBitmap;
+
+const QOI_MAGIC = $66696F71;
+
+implementation
 
 ResourceString
   sQoiImageFile = 'QOI image file';
 
 type
-  THackedBitmap = class(TBitmap);
-
-  TColor32 = type Cardinal;
-
-  TARGB = packed record
-    case Boolean of
-      false:
-        (B: Byte; G: Byte; R: Byte; A: Byte);
-      true:
-        (Color: TColor32);
-  end;
-
-  PARGB = ^TARGB;
-  TArrayOfColor32 = array of TColor32;
-  TArrayOfByte = array of Byte;
-
   TQOI_DESC = packed record
     magic: Cardinal;
     width: Cardinal;
@@ -117,7 +110,6 @@ const
   QOI_OP_RGB = $FE;
   QOI_OP_RGBA = $FF;
   QOI_MASK_2 = $C0;
-  QOI_MAGIC = $66696F71;
   QOI_HEADER_SIZE = 14;
   qoi_padding: array [0 .. 7] of Byte = (0, 0, 0, 0, 0, 0, 0, 1);
   qoi_padding_size = 8;
@@ -156,84 +148,318 @@ begin
   inc(p);
 end;
 
-function IsTransparent(bmp: TBitmap): Boolean;
+function LoadFromQoiStream(Stream: TStream): TImageRec;
 var
-  i : Integer;
-  c : PARGB;
+  len: integer;
+  bytes: TBytes;
 begin
-  Result := bmp.PixelFormat = pf32bit;
-  if not Result then Exit;
-  c := PARGB(bmp.ScanLine[bmp.Height -1]);
-  for i := 0 to bmp.Width * bmp.Height -1 do
-  begin
-    if c.A < 255 then Exit;
-    inc(c);
-  end;
-  Result := false;
+  if not Assigned(Stream) then Exit;
+  len := Stream.Size - Stream.Position;
+  SetLength(bytes, len);
+  Stream.Read(bytes[0], len);
+  Result := LoadFromQoiBytes(bytes);
 end;
 
-function CreateTransparentPNG(qoi: TQoiImage): TPNGImage;
+{$R-}
+function LoadFromQoiBytes(const bytes: TBytes): TImageRec;
 var
-  X, Y: integer;
-  src: PARGB;
-  dstAlpha: PByte;
+  len, run, vg, i: Integer;
+  desc: TQOI_DESC;
+  index: array [0 .. 63] of TARGB;
+  px: TARGB;
+  b1, b2: Byte;
+  dst: PARGB;
+  src: PByte;
+  hasAlpha: Boolean;
 begin
-  Result := TPNGImage.CreateBlank(COLOR_RGBALPHA,
-    8, qoi.Width , qoi.Height);
+  FillChar(Result, SizeOf(Result), 0);
 
-  Result.CreateAlpha;
-  Result.Canvas.CopyMode:= cmSrcCopy;
-  Result.Canvas.Draw(0, 0, qoi);
+  len := Length(bytes);
+  if len < QOI_HEADER_SIZE + qoi_padding_size then Exit;
 
-  for Y := 0 to Pred(qoi.Height) do
+  src := @bytes[0];
+  Move(src^, desc, SizeOf(TQOI_DESC));
+  inc(src, SizeOf(TQOI_DESC));
+  with desc do
   begin
-    src := qoi.Image.ScanLine[Y];
-    dstAlpha := PByte(Result.AlphaScanline[Y]);
-    for X := 0 to Pred(qoi.width) do
+    width := SwapBytes(width);
+    height := SwapBytes(height);
+    if (magic <> QOI_MAGIC) or (width = 0) or (height = 0) or (channels < 3) or
+      (channels > 4) or (colorspace > 1) then
+      Exit;
+    Result.Width := width;
+    Result.Height := height;
+    SetLength(Result.Pixels, width * height);
+  end;
+  px.Color := $FF000000;
+  run := 0;
+  FillChar(index, SizeOf(index), 0);
+  hasAlpha := false;
+
+  dst := @Result.Pixels[0];
+  for i := 0 to Result.Width * Result.Height -1 do
+  begin
+    if (run > 0) then
     begin
-      dstAlpha^ :=  src.A;
-      Inc(dstAlpha);
-      Inc(src);
+      Dec(run);
+    end else
+    begin
+      b1 := ReadByte(src);
+      if (b1 = QOI_OP_RGB) then
+      begin
+        px.R := ReadByte(src);
+        px.G := ReadByte(src);
+        px.B := ReadByte(src);
+      end
+      else if (b1 = QOI_OP_RGBA) then
+      begin
+        px.R := ReadByte(src);
+        px.G := ReadByte(src);
+        px.B := ReadByte(src);
+        px.A := ReadByte(src);
+        hasAlpha := hasAlpha or (px.A < 255);
+      end
+      else if ((b1 and QOI_MASK_2) = QOI_OP_INDEX) then
+      begin
+        px := index[b1];
+      end
+      else if (b1 and QOI_MASK_2) = QOI_OP_DIFF then
+      begin
+        px.R := px.R + ((b1 shr 4) and 3) - 2;
+        px.G := px.G + ((b1 shr 2) and 3) - 2;
+        px.B := px.B + (b1 and 3) - 2;
+      end
+      else if (b1 and QOI_MASK_2) = QOI_OP_LUMA then
+      begin
+        b2 := ReadByte(src);
+        vg := (b1 and $3F) - 32;
+        px.R := px.R + vg - 8 + ((b2 shr 4) and $F);
+        px.G := px.G + vg;
+        px.B := px.B + vg - 8 + (b2 and $F);
+      end
+      else if (b1 and QOI_MASK_2) = QOI_OP_RUN then
+        run := (b1 and $3F);
+      index[QOI_COLOR_HASH(px)] := px;
+    end;
+    dst.Color := px.Color;
+    inc(dst);
+  end;
+
+  if hasAlpha then
+    Result.Channels := 4 else
+    Result.Channels := 3;
+end;
+{$R+}
+
+procedure SaveToQoiStream(const img: TImageRec; Stream: TStream);
+var
+  bytes: TBytes;
+begin
+  bytes := SaveToQoiBytes(img);
+  Stream.Write(bytes[0], Length(bytes));
+end;
+
+function SaveToQoiBytes(const img: TImageRec): TBytes;
+var
+  x,y,k,y2, max_size, run, channels: Integer;
+  vr, vg, vb, vg_r, vg_b: Integer;
+  len, index_pos: Integer;
+  dst: PByte;
+  src: PARGB;
+  index: array [0 .. 63] of TARGB;
+  px_prev: TARGB;
+begin
+  Result := nil;
+  len := img.Width * img.Height;
+  if (len = 0) then Exit;
+
+  channels := img.Channels;
+  max_size := len * channels + QOI_HEADER_SIZE + qoi_padding_size;
+  SetLength(Result, max_size);
+
+  dst := @Result[0];
+  qoi_write_32(dst, QOI_MAGIC);
+  qoi_write_32(dst, SwapBytes(img.Width));
+  qoi_write_32(dst, SwapBytes(img.Height));
+  qoi_write_8(dst, channels);
+  qoi_write_8(dst, 0); // colorspace
+
+  run := 0;
+  px_prev.Color := $FF000000;
+  FillChar(index, SizeOf(index), 0);
+
+  src := @img.Pixels[0];
+  for y := 0 to len -1 do
+  begin
+    if src.Color = px_prev.Color then
+    begin
+      inc(run);
+      if (run = 62) then
+      begin
+        qoi_write_8(dst, QOI_OP_RUN or (run - 1));
+        run := 0;
+      end;
+    end
+    else
+    begin
+      if (run > 0) then
+      begin
+        qoi_write_8(dst, QOI_OP_RUN or (run - 1));
+        run := 0;
+      end;
+
+      index_pos := QOI_COLOR_HASH(src^);
+      if (index[index_pos].Color = src.Color) then
+      begin
+        qoi_write_8(dst, QOI_OP_INDEX or index_pos);
+      end
+      else
+      begin
+        index[index_pos] := src^;
+        if (src.A = px_prev.A) then
+        begin
+          vr := src.R - px_prev.R;
+          vg := src.G - px_prev.G;
+          vb := src.B - px_prev.B;
+          vg_r := vr - vg;
+          vg_b := vb - vg;
+          if ((vr > -3) and (vr < 2) and (vg > -3) and (vg < 2) and (vb > -3)
+            and (vb < 2)) then
+          begin
+            qoi_write_8(dst, QOI_OP_DIFF or (vr + 2) shl 4 or (vg + 2) shl 2 or
+              (vb + 2));
+          end
+          else if ((vg_r > -9) and (vg_r < 8) and (vg > -33) and (vg < 32) and
+            (vg_b > -9) and (vg_b < 8)) then
+          begin
+            qoi_write_8(dst, QOI_OP_LUMA or (vg + 32));
+            qoi_write_8(dst, (vg_r + 8) shl 4 or (vg_b + 8));
+          end
+          else
+          begin
+            qoi_write_8(dst, QOI_OP_RGB);
+            qoi_write_8(dst, src.R);
+            qoi_write_8(dst, src.G);
+            qoi_write_8(dst, src.B);
+          end
+        end
+        else
+        begin
+          qoi_write_8(dst, QOI_OP_RGBA);
+          qoi_write_8(dst, src.R);
+          qoi_write_8(dst, src.G);
+          qoi_write_8(dst, src.B);
+          qoi_write_8(dst, src.A);
+        end;
+      end;
+    end;
+    px_prev := src^;
+    inc(src);
+  end;
+
+  if (run > 0) then
+    qoi_write_8(dst, QOI_OP_RUN or (run - 1));
+
+  for x := 0 to 7 do
+    qoi_write_8(dst, qoi_padding[x]);
+  max_size := dst - PByte(@Result[0]);
+  SetLength(Result, max_size);
+end;
+
+function CreateBitmapFromImgRec(const img: TImageRec): TBitmap;
+begin
+  Result := TBitmap.Create(img.Width, img.Height);
+  Result.PixelFormat := pf32bit;
+  SetBitmapBits(Result.Handle, img.Width * img.Height *4, @img.Pixels[0]);
+end;
+
+procedure SetAlpha255(var img: TImageRec);
+var
+  i, len: integer;
+  p: PARGB;
+begin
+  len := Length(img.Pixels);
+  if len = 0 then Exit;
+  p := @img.Pixels[0];
+  for i := 0 to len -1 do
+  begin
+    p.A := 255;
+    inc(p);
+  end;
+end;
+
+function IsAlphaBlended(img: TImageRec): Boolean;
+var
+  i, len: integer;
+  p: PARGB;
+  has0, has255: Boolean;
+begin
+  Result := true;
+  len := Length(img.Pixels);
+  if len = 0 then Exit;
+  p := @img.Pixels[0];
+  has0    := false;
+  has255  := false;
+  for i := 0 to len -1 do
+  begin
+    if p.A = 0 then has0 := true
+    else if p.A = 255 then has255 := true
+    else exit;
+    inc(p);
+  end;
+  Result := has0 <> has255;
+end;
+
+function GetImgRecFromBitmap(bmp: TBitmap): TImageRec;
+var
+  len: integer;
+  tmp: TBitmap;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  len := bmp.Width * bmp.Height;
+  SetLength(Result.Pixels, len);
+  if len = 0 then Exit;
+  Result.Width := bmp.Width;
+  Result.Height := bmp.Height;
+
+  if bmp.PixelFormat = pf32bit then
+  begin
+    GetBitmapBits(bmp.Handle, len *4, @Result.Pixels[0]);
+    if IsAlphaBlended(Result) then
+      Result.Channels := 4 else
+      Result.Channels := 3;
+  end else
+  begin
+    tmp := TBitmap.Create;
+    try
+      tmp.Assign(bmp);
+      tmp.PixelFormat := pf32bit;
+      GetBitmapBits(tmp.Handle, len *4, @Result.Pixels[0]);
+      Result.Channels := 3;
+    finally
+      tmp.Free;
     end;
   end;
+  if Result.Channels = 3 then SetAlpha255(Result);
 end;
 
 //------------------------------------------------------------------------------
 // TQoiImage methods
 //------------------------------------------------------------------------------
 
-constructor TQoiImage.Create;
-begin
-  inherited;
-  FBitmap := TBitmap.Create;
-  FBitmap.OnChange := ImageChanged;
-end;
-
-destructor TQoiImage.Destroy;
-begin
-  FBitmap.Free;
-  inherited;
-end;
-
 procedure TQoiImage.AssignTo(Dest: TPersistent);
 var
-  tmpPng: TPngImage;
+  bmp: TBitmap;
 begin
   if Dest is TQoiImage then
-  begin
-    TQoiImage(Dest).Image.Assign(Image);
-    TQoiImage(Dest).FTranspency := FTranspency;
-  end
+    TQoiImage(Dest).Assign(self)
   else if Dest is TBitmap then
   begin
-    TBitmap(Dest).Assign(Image);
-  end else if Dest is TPngImage then
-  begin
-    tmpPng := CreateTransparentPNG(self);
+    bmp := CreateBitmapFromImgRec(FQoi);
     try
-      TPngImage(Dest).Assign(tmpPng);
+      TBitmap(Dest).Assign(bmp);
     finally
-      tmpPng.Free;
+      bmp.Free;
     end;
   end
   else inherited;
@@ -241,48 +467,32 @@ end;
 
 procedure TQoiImage.Assign(Source: TPersistent);
 begin
-  if Source is TQoiImage then
+  if (Source is TQoiImage) then
   begin
-    Image.Assign(TQoiImage(Source).Image);
-    FTranspency := TQoiImage(Source).FTranspency;
-  end else
+    FQoi := TQoiImage(Source).FQoi;
+    Changed(self);
+  end
+  else if Source is TBitmap then
   begin
-    Image.Assign(Source);
-    Image.PixelFormat := pf32bit;
-    Image.AlphaFormat := afIgnored; //unpremultiplies if premultiplied
-  end;
+    FQoi := GetImgRecFromBitmap(TBitmap(Source));
+    Changed(self);
+  end
+  else inherited;
 end;
 
-function TQoiImage.GetHasTransparency: Boolean;
-begin
-  case FTranspency of
-    tsUnknown:
-    begin
-      Result := IsTransparent(Image);
-      if Result then
-        FTranspency := tsTrue else
-        FTranspency := tsFalse
-    end;
-    tsFalse: Result := False;
-    else Result := True;
-  end;
-end;
+type THackedBitmap = class(TBitmap);
 
 procedure TQoiImage.Draw(ACanvas: TCanvas; const Rect: TRect);
 var
+  bmp: TBitmap;
   BlendFunction: TBlendFunction;
   w, h: integer;
-  tmpBmp: TBitmap;
 begin
-  if HasTransparency then
-  begin
-    //Pre-multiplication is required for Windows'
-    //alpha blending. But since it slightly degrades
-    //the original image, we'll use a temporary image
-    tmpBmp := TBitmap.create;
-    try
-      tmpBmp.Assign(Image);
-      tmpBmp.AlphaFormat := afPremultiplied; //premultiplies tmpBmp
+  bmp := CreateBitmapFromImgRec(FQoi);
+  try
+    if HasTransparency then
+    begin
+      bmp.AlphaFormat := afDefined;
       BlendFunction.BlendOp := AC_SRC_OVER;
       BlendFunction.AlphaFormat := AC_SRC_ALPHA;
       BlendFunction.SourceConstantAlpha := 255;
@@ -291,330 +501,121 @@ begin
       h := System.Math.Min(Height, Rect.Height);
       Winapi.Windows.AlphaBlend(
         ACanvas.Handle, Rect.Left, Rect.Top, w, h,
-        tmpBmp.Canvas.Handle, 0, 0, w,h, BlendFunction);
-    finally
-      tmpBmp.Free;
-    end;
-  end else
-    THackedBitmap(Image).Draw(ACanvas, Rect);
+        bmp.Canvas.Handle, 0, 0, w,h, BlendFunction);
+    end else
+      THackedBitmap(bmp).Draw(ACanvas, Rect);
+  finally
+    bmp.Free;
+  end;
 end;
 
 function TQoiImage.GetEmpty: Boolean;
 begin
-  Result := THackedBitmap(Image).GetEmpty;
-end;
-
-function TQoiImage.GetHeight: Integer;
-begin
-  Result := THackedBitmap(Image).GetHeight;
+  Result := FQoi.Width * FQoi.Height = 0;
 end;
 
 function TQoiImage.GetTransparent: Boolean;
 begin
-  Result := THackedBitmap(Image).GetTransparent;
+  if FQoi.Channels = 4 then Result := true
+  else if FQoi.Channels = 3 then Result := false
+  else
+  begin
+    Result := IsAlphaBlended(FQoi);
+    if Result then FQoi.Channels := 4
+    else FQoi.Channels := 3;
+  end;
+end;
+
+function TQoiImage.GetHeight: Integer;
+begin
+  Result := FQoi.Height;
 end;
 
 function TQoiImage.GetWidth: Integer;
 begin
-  Result := THackedBitmap(Image).GetWidth;
+  Result := FQoi.Width;
 end;
 
 procedure TQoiImage.SetHeight(Value: Integer);
 begin
-  THackedBitmap(Image).SetHeight(Value);
+  SetSize(Width, Value);
 end;
 
 procedure TQoiImage.SetWidth(Value: Integer);
 begin
-  THackedBitmap(Image).SetWidth(Value);
+  SetSize(Value, Height);
 end;
 
-procedure TQoiImage.ImageChanged(Sender: TObject);
+procedure TQoiImage.SetSize(AWidth, AHeight: Integer);
 begin
-  FTranspency := tsUnknown;
+  FQoi.Width := AWidth;
+  FQoi.Height := AHeight;
+  FQoi.Channels := 0;
+  SetLength(FQoi.Pixels, AWidth * AHeight);
+  Changed(Self);
+end;
+
+procedure TQoiImage.SetImageRec(const imgRec: TImageRec);
+begin
+  FQoi := imgRec;
+  Changed(Self);
 end;
 
 class function TQoiImage.CanLoadFromStream(Stream: TStream): Boolean;
 var
   p: Int64;
-  QOI_DESC: TQOI_DESC;
+  q: Cardinal;
 begin
   p := Stream.Position;
   try
-    Result := (Stream.Read(QOI_DESC, SizeOf(TQOI_DESC)) = SizeOf(TQOI_DESC)) and
-      (QOI_DESC.magic = QOI_MAGIC) and (QOI_DESC.width > 0) and
-      (QOI_DESC.height > 0);
+    Result := (Stream.Read(q, 4) = 4) and (q = QOI_MAGIC);
   finally
     Stream.Position := p;
   end;
-
-  if not Result then
-    Result := TBitmap.CanLoadFromStream(Stream);
 end;
 
-{$R-}
 procedure TQoiImage.LoadFromStream(Stream: TStream);
-var
-  size, run, vg, x, y: Integer;
-  desc: TQOI_DESC;
-  index: array [0 .. 63] of TARGB;
-  px: TARGB;
-  b1, b2: Byte;
-  dst: PARGB;
-  src, src0: PByte;
 begin
-  if not Assigned(Stream) then
-    Exit;
-
-  if TBitmap.CanLoadFromStream(Stream) then
-  begin
-    Image.LoadFromStream(Stream);
-    Exit;
-  end;
-
-
-  size := Stream.size - Stream.Position;
-  if size < QOI_HEADER_SIZE + qoi_padding_size then
-    Exit;
-
-  if Stream is TMemoryStream then
-  begin
-    src0 := nil;
-    src := TMemoryStream(stream).Memory;
-    inc(src, stream.Position);
-  end else
-  begin
-    //Using GetMem instead of TArrayOfByte saves the
-    //very small time cost of zeroing the memory
-    GetMem(src0, size);
-    Stream.Read(src0^, size);
-    src := src0;
-  end;
-
-  try
-    Move(src^, desc, SizeOf(TQOI_DESC));
-    inc(src, SizeOf(TQOI_DESC));
-    with desc do
-    begin
-      width := SwapBytes(width);
-      height := SwapBytes(height);
-      if (magic <> QOI_MAGIC) or (width = 0) or (height = 0) or (channels < 3) or
-        (channels > 4) or (colorspace > 1) then
-        Exit;
-      Image.PixelFormat := pf32bit;
-      Image.AlphaFormat := afIgnored;
-      Image.SetSize(width, height);
-      if desc.channels = 4 then
-        FTranspency := tsTrue else
-        FTranspency := tsFalse;
-    end;
-    px.Color := $FF000000;
-    run := 0;
-    FillChar(index, SizeOf(index), 0);
-
-    for y := 0 to Image.height -1 do
-    begin
-      dst := PARGB(Image.ScanLine[y]);
-      for x := 0 to Image.Width -1 do
-      begin
-        if (run > 0) then
-        begin
-          Dec(run);
-        end else
-        begin
-          b1 := ReadByte(src);
-          if (b1 = QOI_OP_RGB) then
-          begin
-            px.R := ReadByte(src);
-            px.G := ReadByte(src);
-            px.B := ReadByte(src);
-          end
-          else if (b1 = QOI_OP_RGBA) then
-          begin
-            px.R := ReadByte(src);
-            px.G := ReadByte(src);
-            px.B := ReadByte(src);
-            px.A := ReadByte(src);
-          end
-          else if ((b1 and QOI_MASK_2) = QOI_OP_INDEX) then
-          begin
-            px := index[b1];
-          end
-          else if (b1 and QOI_MASK_2) = QOI_OP_DIFF then
-          begin
-            px.R := px.R + ((b1 shr 4) and 3) - 2;
-            px.G := px.G + ((b1 shr 2) and 3) - 2;
-            px.B := px.B + (b1 and 3) - 2;
-          end
-          else if (b1 and QOI_MASK_2) = QOI_OP_LUMA then
-          begin
-            b2 := ReadByte(src);
-            vg := (b1 and $3F) - 32;
-            px.R := px.R + vg - 8 + ((b2 shr 4) and $F);
-            px.G := px.G + vg;
-            px.B := px.B + vg - 8 + (b2 and $F);
-          end
-          else if (b1 and QOI_MASK_2) = QOI_OP_RUN then
-            run := (b1 and $3F);
-          index[QOI_COLOR_HASH(px)] := px;
-        end;
-        dst.Color := px.Color;
-        inc(dst);
-      end;
-    end;
-  finally
-    if Assigned(src0) then
-      FreeMem(src0);
-  end;
+  if not Assigned(Stream) then Exit;
+  FQoi := LoadFromQoiStream(Stream);
   Changed(Self);
 end;
-{$R+}
 
 procedure TQoiImage.SaveToFile(const Filename: string);
 begin
-  FSaveAsBmp := SameText('.bmp', ExtractFileExt(Filename));
   inherited;
-  FSaveAsBmp := false;
 end;
 
 procedure TQoiImage.SaveToStream(Stream: TStream);
-var
-  x,y,k,y2, max_size, run, channels: Integer;
-  vr, vg, vb, vg_r, vg_b: Integer;
-  index_pos: Integer;
-  bytes: TBytes;
-  dst: PByte;
-  src: PARGB;
-  index: array [0 .. 63] of TARGB;
-  px_prev: TARGB;
 begin
-  if not Assigned(Stream) or Image.Empty then
-    Exit;
-
-  if FSaveAsBmp then
-  begin
-    Image.SaveToStream(Stream);
-    Exit;
-  end;
-
-  if HasTransparency then channels := 4 else channels := 3;
-
-  max_size := Image.width * Image.height * channels + QOI_HEADER_SIZE +
-    qoi_padding_size;
-  SetLength(bytes, max_size);
-  Image.PixelFormat := pf32bit;
-
-  dst := @bytes[0];
-  qoi_write_32(dst, QOI_MAGIC);
-  qoi_write_32(dst, SwapBytes(Image.width));
-  qoi_write_32(dst, SwapBytes(Image.height));
-  qoi_write_8(dst, channels);
-  qoi_write_8(dst, 0); // colorspace
-
-  run := 0;
-  px_prev.Color := $FF000000;
-  FillChar(index, SizeOf(index), 0);
-
-  //ISTM that bitmaps are always stored 'bottom-up' in memory
-  //(even those loaded from 'top-down' streams). Unfortunately
-  //this makes parsing these pixels slightly less efficient.
-  for y := 0 to Image.height -1 do
-  begin
-    src := PARGB(Image.ScanLine[y]);
-    for x := 1 to Width do
-    begin
-      if src.Color = px_prev.Color then
-      begin
-        inc(run);
-        if (run = 62) then
-        begin
-          qoi_write_8(dst, QOI_OP_RUN or (run - 1));
-          run := 0;
-        end;
-      end
-      else
-      begin
-        if (run > 0) then
-        begin
-          qoi_write_8(dst, QOI_OP_RUN or (run - 1));
-          run := 0;
-        end;
-
-        index_pos := QOI_COLOR_HASH(src^);
-        if (index[index_pos].Color = src.Color) then
-        begin
-          qoi_write_8(dst, QOI_OP_INDEX or index_pos);
-        end
-        else
-        begin
-          index[index_pos] := src^;
-          if (src.A = px_prev.A) then
-          begin
-            vr := src.R - px_prev.R;
-            vg := src.G - px_prev.G;
-            vb := src.B - px_prev.B;
-            vg_r := vr - vg;
-            vg_b := vb - vg;
-            if ((vr > -3) and (vr < 2) and (vg > -3) and (vg < 2) and (vb > -3)
-              and (vb < 2)) then
-            begin
-              qoi_write_8(dst, QOI_OP_DIFF or (vr + 2) shl 4 or (vg + 2) shl 2 or
-                (vb + 2));
-            end
-            else if ((vg_r > -9) and (vg_r < 8) and (vg > -33) and (vg < 32) and
-              (vg_b > -9) and (vg_b < 8)) then
-            begin
-              qoi_write_8(dst, QOI_OP_LUMA or (vg + 32));
-              qoi_write_8(dst, (vg_r + 8) shl 4 or (vg_b + 8));
-            end
-            else
-            begin
-              qoi_write_8(dst, QOI_OP_RGB);
-              qoi_write_8(dst, src.R);
-              qoi_write_8(dst, src.G);
-              qoi_write_8(dst, src.B);
-            end
-          end
-          else
-          begin
-            qoi_write_8(dst, QOI_OP_RGBA);
-            qoi_write_8(dst, src.R);
-            qoi_write_8(dst, src.G);
-            qoi_write_8(dst, src.B);
-            qoi_write_8(dst, src.A);
-          end;
-        end;
-      end;
-      px_prev := src^;
-      inc(src);
-    end;
-  end;
-
-  if (run > 0) then
-    qoi_write_8(dst, QOI_OP_RUN or (run - 1));
-
-  for x := 0 to 7 do
-    qoi_write_8(dst, qoi_padding[x]);
-  max_size := dst - PByte(@bytes[0]);
-
-  Stream.Write(bytes[0], max_size);
+  SaveToQoiStream(FQoi, Stream);
 end;
 
 procedure TQoiImage.LoadFromClipboardFormat(AFormat: Word; AData: THandle;
   APalette: HPALETTE);
+var
+  bmp: TBitmap;
 begin
-  THackedBitmap(Image).LoadFromClipboardFormat(AFormat, AData, APalette);
+  bmp := TBitmap.Create;
+  try
+    THackedBitmap(bmp).LoadFromClipboardFormat(AFormat, AData, APalette);
+    FQoi := GetImgRecFromBitmap(bmp);
+  finally
+    bmp.Free;
+  end;
 end;
 
-procedure TQoiImage.SaveToClipboardFormat(var AFormat: Word; var AData: THandle;
-  var APalette: HPALETTE);
+procedure TQoiImage.SaveToClipboardFormat(var AFormat: Word;
+  var AData: THandle; var APalette: HPALETTE);
+var
+  bmp: TBitmap;
 begin
-  THackedBitmap(Image).SaveToClipboardFormat(AFormat, AData, APalette);
-end;
-
-procedure TQoiImage.SetSize(AWidth, AHeight: Integer);
-begin
-  THackedBitmap(Image).SetSize(AWidth, AHeight);
+  bmp := CreateBitmapFromImgRec(FQoi);
+  try
+    THackedBitmap(bmp).SaveToClipboardFormat(AFormat, AData, APalette);
+  finally
+    bmp.Free;
+  end;
 end;
 
 initialization
