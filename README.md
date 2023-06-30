@@ -6,28 +6,23 @@ https://github.com/phoboslab/qoi
 
 
 Example:
-
 <pre><code>
-<b>uses</b> Vcl.Imaging.QOI;
-...
-<b>var</b>
-  qoi: TQoiImage;
-<b>begin</b>
-  qoi := TQoiImage.Create;
-  <b>try</b>
-    qoi.LoadFromFile('.\dice.qoi');
-    <i>//display the image ...</i>
-    Image1.Picture.Bitmap.Assign(qoi);
-    if qoi.HasTransparency then
-      Image1.Picture.Bitmap.AlphaFormat := afDefined;
-  <b>finally</b>
-    qoi.Free;
-  <b>end</b>;
+<b>uses</b> Forms, Graphics, QoiImage;
+
+type
+  TForm1 = class(TForm)
+    ...
+    image: TImage;
+    ...
+
+procedure TForm1.FormCreate(Sender: TObject);
+begin
+  Image1.Picture.LoadFromFile('.\dice.qoi');
+end;
 </code></pre>
 
 # QoiShellExtensions.dll
 Windows Explorer (64bit) Preview Handler and Thumbnail Provider shell extensions.<br>
-(Zip package includes Delphi source code.)
 
 ![previewhandler](https://user-images.githubusercontent.com/5280692/149751938-dc65d49d-77a4-43a8-b894-d0503254f929.png)
 
